@@ -15,6 +15,7 @@
 extern TIM_HandleTypeDef htim1;
 extern UART_HandleTypeDef huart1;
 extern ADC_HandleTypeDef hadc1;
+extern DMA_HandleTypeDef hdma_adc1;
 
 /******************************************************************************/
 /*           Cortex-M4 Processor Interruption and Exception Handlers          */
@@ -74,6 +75,14 @@ void SysTick_Handler(void)
 /******************************************************************************/
 /* STM32G4xx Peripheral Interrupt Handlers                                    */
 /******************************************************************************/
+
+/**
+  * @brief This function handles DMA1 channel 1 interrupt.
+  */
+void DMA1_Channel1_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hdma_adc1);
+}
 
 /**
   * @brief This function handles TIM1 update interrupt and TIM16 global interrupt.

@@ -17,7 +17,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "arm_math.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -82,7 +81,7 @@ volatile int32_t convolution_data[16];
 volatile float convolution = 0;
 volatile uint32_t sub = 0;
 volatile int32_t  pwrMax = 0, pwrMin = 0;
-volatile float32_t SNR = 0;
+volatile float SNR = 0;
 volatile uint32_t N = 0;
 volatile bool sync_catch_flg = false;
 volatile rx_status Rx_sts = SYNC;
@@ -140,8 +139,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 		HAL_ResumeTick();
 		__HAL_RCC_ADC12_CLK_ENABLE();
 		__HAL_RCC_DMA1_CLK_ENABLE();
-		__HAL_RCC_GPIOA_CLK_ENABLE();
-	 	__HAL_RCC_GPIOB_CLK_ENABLE();
 
 		// Разрешение работы усилителя (лог. «1» - работа)
 		HAL_GPIO_WritePin(AMP_EN_GPIO_Port, AMP_EN_Pin, GPIO_PIN_SET);
@@ -178,7 +175,7 @@ void ADC_Process_ISR(void)
 	if(Rx_sts == SYNC){
 	    sub =  __SHSUB16(BUFF[0], BUFF[1]);
 	    sgn = __SMUAD(sub, sub);
-	    arm_sqrt_f32(sgn, &sqr);
+	    sqr = sqrtf((float)sgn);
 
 	    // скользящее среднее
 	    w_ma++;
@@ -338,8 +335,12 @@ int main(void)
 	      N++;
 	      sync_catch_flg = 0;
 	      S_summ = 0;
-	      pwrMin = (Signal_ma[(w + 1848) % 0x7fe] + Signal_ma[(w + 1056) % 0x7fe]) / 2;
-	      SNR = (pwrMax - pwrMin) / pwrMin;
+	      pwrMin = (Signal_ma[(w + 1848) % SYNC_SEQ_LEN] + Signal_ma[(w + 1056) % SYNC_SEQ_LEN]) / 2;
+	      if (pwrMin > 0) {
+	          SNR = (float)(pwrMax - pwrMin) / (float)pwrMin;
+	      } else {
+	          SNR = 0.0f;
+	      }
 	      pwrMax = 0;
 	      pwrMin = 0;
 	      p_c = 0;
@@ -386,8 +387,6 @@ int main(void)
         	HAL_GPIO_WritePin(AMP_EN_GPIO_Port, AMP_EN_Pin, GPIO_PIN_RESET);
         	__HAL_RCC_ADC12_CLK_DISABLE();
         	__HAL_RCC_DMA1_CLK_DISABLE();
-        	__HAL_RCC_GPIOA_CLK_DISABLE();
-        	__HAL_RCC_GPIOB_CLK_DISABLE();
         	HAL_SuspendTick();
         	HAL_PWR_EnterSLEEPMode(PWR_LOWPOWERREGULATOR_ON, PWR_SLEEPENTRY_WFI);
 #endif

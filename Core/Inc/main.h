@@ -55,6 +55,7 @@ typedef struct __attribute__((packed)) {
 
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 
 /* USER CODE BEGIN EFP */
 float Read_Temperature_TMP235(void);
