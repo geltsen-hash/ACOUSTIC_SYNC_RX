@@ -95,6 +95,7 @@ const uint32_t led_pulse_off_time = ticks_per_bit * 31 - ticks_per_period * 6;
 const uint32_t print_start_time = SYSCLK_FREQ_HZ / 2;
 
 volatile uint32_t local_ticks_per_sync_period = 0;
+volatile uint32_t sync_raw_phase_cnt = 0;
 uint8_t artur_income[3];
 OutputPacket_t artur_output;
 /* USER CODE END PV */
@@ -243,7 +244,7 @@ void ADC_Process_ISR(void)
 		    && convolution_data[(w_c + 3) & 0x7] > convolution_data[(w_c + 4) & 0x7]
 		  ){
 	    	 HAL_GPIO_WritePin(LED_GPIO_Port, LED_PIN, GPIO_PIN_SET); // включение светодиода PB15
-	    	 TIM2->CNT = 0x0;
+	    	 sync_raw_phase_cnt = TIM2->CNT;
 	    	 local_ticks_per_sync_period = DWT->CYCCNT;
 	    	 DWT->CYCCNT = 0U;
 	    	 sync_catch_flg = 1;
@@ -348,8 +349,12 @@ int main(void)
 	      // Периодическое чтение температуры
 	      current_temperature = Read_Temperature_TMP235();
 
-	      // Адаптивная фильтрация периода и подстройка TIM2->ARR
-	      uint32_t recommended_arr_period = SyncTracker_OnSyncDetected(&sync_tracker, local_ticks_per_sync_period, current_temperature);
+	      // DPLL адаптивная фильтрация периода и фазы с подстройкой TIM2->ARR
+	      uint32_t current_arr = TIM2->ARR + 1;
+	      uint32_t recommended_arr_period = SyncTracker_OnSyncDetected(&sync_tracker, local_ticks_per_sync_period, sync_raw_phase_cnt, current_arr, current_temperature);
+	      if (SyncTracker_IsHardResetRequired(&sync_tracker)) {
+	          TIM2->CNT = 0x0; // Разовый сброс фазы при начальном захвате
+	      }
 	      TIM2->ARR = recommended_arr_period - 1;
 
 	      NVIC_DisableIRQ(ADC1_2_IRQn);
