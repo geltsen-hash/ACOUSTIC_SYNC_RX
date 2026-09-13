@@ -27,15 +27,15 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "sync_tracker.h"
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
 typedef struct __attribute__((packed)) {
-	uint8_t sync_status;
-	float difference;
-	float snr;
+	uint8_t sync_status; /* 0: SEARCH, 1: LOCKED, 2: HOLDOVER */
+	float difference;    /* Frequency drift / time offset in microseconds */
+	float snr;           /* Signal-to-Noise Ratio */
 } OutputPacket_t;
 /* USER CODE END ET */
 

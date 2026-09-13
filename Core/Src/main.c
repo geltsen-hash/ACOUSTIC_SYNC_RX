@@ -62,6 +62,7 @@ TIM_HandleTypeDef htim2;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+SyncTracker_t sync_tracker;
 uint32_t sleep_pause = 1920;
 uint16_t sequence_size = 2048;
 uint16_t byte_size = 66;
@@ -146,7 +147,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 		HAL_GPIO_WritePin(AMP_EN_GPIO_Port, AMP_EN_Pin, GPIO_PIN_SET);
 #endif
 		p_c++;
-		if (p_c == 10) {
+		if (p_c >= 10) {
 			p_c = 0;
 			pwrMax = 0;
 			S_summ = 0;
@@ -157,9 +158,17 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 			NVIC_EnableIRQ(ADC1_2_IRQn);
 		}
 
+		// Режим Holdover: если в прошедшем периоде синхросигнал не был детектирован
+		if (sync_catch_flg == 0 && sync_tracker.lock_count > 0) {
+			current_temperature = Read_Temperature_TMP235();
+			uint32_t holdover_period = SyncTracker_OnSyncMissed(&sync_tracker, current_temperature);
+			TIM2->ARR = holdover_period - 1;
+			artur_output.sync_status = (uint8_t)SyncTracker_GetState(&sync_tracker);
+			artur_output.difference = SyncTracker_GetDifferenceUs(&sync_tracker);
+		}
+
 		NVIC_EnableIRQ(ADC1_2_IRQn);
 		Rx_sts = SYNC;
-		artur_output.sync_status = false;
 	}
 }
 
@@ -278,6 +287,9 @@ int main(void)
   MX_USART1_UART_Init();
 
   /* USER CODE BEGIN 2 */
+  // Инициализация адаптивного трекера синхронизации
+  SyncTracker_Init(&sync_tracker);
+
   // Калибровка АЦП
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
   HAL_ADCEx_Calibration_Start(&hadc4, ADC_SINGLE_ENDED);
@@ -335,6 +347,10 @@ int main(void)
 	      // Периодическое чтение температуры
 	      current_temperature = Read_Temperature_TMP235();
 
+	      // Адаптивная фильтрация периода и подстройка TIM2->ARR
+	      uint32_t recommended_arr_period = SyncTracker_OnSyncDetected(&sync_tracker, local_ticks_per_sync_period, current_temperature);
+	      TIM2->ARR = recommended_arr_period - 1;
+
 	      NVIC_DisableIRQ(ADC1_2_IRQn);
 	      memset((void*)Signal_ma, 0x00, sequence_size * sizeof(Signal_ma[0]));
 	      memset((void*)S_data, 0x00, byte_size * sizeof(S_data[0]));
@@ -348,15 +364,15 @@ int main(void)
 
 	      while((int32_t)(TIM2->CNT - led_pulse_off_time) < 0) {;}
 	      HAL_GPIO_WritePin(LED_GPIO_Port, LED_PIN, GPIO_PIN_RESET);
-	      artur_output.sync_status = true;
+	      artur_output.sync_status = (uint8_t)SyncTracker_GetState(&sync_tracker);
+	      artur_output.difference = SyncTracker_GetDifferenceUs(&sync_tracker);
+	      artur_output.snr = SNR;
 
 #ifndef REQUEST_RESPONSE_MODE
 	      while((int32_t)(TIM2->CNT - print_start_time) < 0) {;}
 	      Rx_sts = PRINT;
 	      if(Rx_sts == PRINT)
 	      {
-		      artur_output.difference = (float)((int32_t)(local_ticks_per_sync_period - SYNC_PERIOD_TICKS)) / DIFF_DIVIDER;
-		      artur_output.snr = SNR;
 		      HAL_HalfDuplex_EnableTransmitter(&huart1);
 		      HAL_UART_Transmit(&huart1, (uint8_t*)(&artur_output), sizeof(artur_output), 2);
 		      Rx_sts = SLEEP;
@@ -665,13 +681,14 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	if(huart == &huart1)
     {
 		NVIC_DisableIRQ(ADC1_2_IRQn);
-		if(artur_output.sync_status == true)
+		if(artur_output.sync_status == SYNC_STATE_LOCKED || artur_output.sync_status == SYNC_STATE_HOLDOVER)
 		    Rx_sts = SLEEP;
 		HAL_GPIO_TogglePin(LED_GPIO_Port, LED_PIN);
     	if(artur_income[0] == 0x37)
     	{
     		delay_micros(100);
-    	    artur_output.difference = (float)((int32_t)(local_ticks_per_sync_period - SYNC_PERIOD_TICKS)) / DIFF_DIVIDER;
+    	    artur_output.difference = SyncTracker_GetDifferenceUs(&sync_tracker);
+    	    artur_output.sync_status = (uint8_t)SyncTracker_GetState(&sync_tracker);
     	    artur_output.snr = SNR;
     	    HAL_HalfDuplex_EnableTransmitter(&huart1);
     	    HAL_UART_Transmit(&huart1, (uint8_t*)(&artur_output), sizeof(artur_output), 2);
