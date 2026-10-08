@@ -107,5 +107,6 @@ extern void ADC_Process_ISR(void);
 
 void ADC1_2_IRQHandler(void)
 {
+  ADC1->ISR = ADC_ISR_EOS | ADC_ISR_EOC | ADC_ISR_OVR;
   ADC_Process_ISR();
 }

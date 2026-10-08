@@ -153,6 +153,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 			memset((void*)Signal_ma, 0x00, sequence_size * sizeof(Signal_ma[0]));
 			memset((void*)S_data, 0x00, byte_size * sizeof(S_data[0]));
 			memset((void*)convolution_data, 0x00, sizeof(convolution_data));
+			ADC1->ISR = ADC_ISR_EOS | ADC_ISR_EOC | ADC_ISR_OVR;
 			NVIC_EnableIRQ(ADC1_2_IRQn);
 		}
 
@@ -165,6 +166,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 			artur_output.difference = SyncTracker_GetDifferenceUs(&sync_tracker);
 		}
 
+		ADC1->ISR = ADC_ISR_EOS | ADC_ISR_EOC | ADC_ISR_OVR;
 		NVIC_EnableIRQ(ADC1_2_IRQn);
 		Rx_sts = SYNC;
 	}
@@ -278,15 +280,21 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
+
   MX_ADC1_Init();
   MX_ADC4_Init();
   MX_TIM1_Init();
   MX_TIM2_Init();
   MX_USART1_UART_Init();
 
+
   /* USER CODE BEGIN 2 */
   // Инициализация адаптивного трекера синхронизации
   SyncTracker_Init(&sync_tracker);
+
+
+//work
+
 
   // Калибровка АЦП
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
@@ -294,9 +302,6 @@ int main(void)
 
   // Включение усилителя (лог. 1)
   HAL_GPIO_WritePin(AMP_EN_GPIO_Port, AMP_EN_Pin, GPIO_PIN_SET);
-
-  // Запуск АЦП1 в непрерывном режиме с DMA
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)BUFF, 2);
 
   // Запуск таймеров
   HAL_TIM_Base_Start_IT(&htim1);
@@ -311,6 +316,12 @@ int main(void)
 		HAL_Delay(60);
   }
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_PIN, GPIO_PIN_RESET);
+
+  // Запуск АЦП1 в непрерывном режиме с DMA (4 выборки за период 154.412 кГц)
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)BUFF, 4);
+  __HAL_ADC_ENABLE_IT(&hadc1, ADC_IT_EOS);
+  __HAL_DMA_DISABLE_IT(&hdma_adc1, DMA_IT_TC | DMA_IT_HT | DMA_IT_TE);
+  HAL_NVIC_DisableIRQ(DMA1_Channel1_IRQn);
 
   artur_income[0] = 0x00; artur_income[1] = 0x00; artur_income[2] = 0x00;
   /* USER CODE END 2 */
@@ -361,6 +372,7 @@ int main(void)
 	      memset((void*)Signal_ma, 0x00, sequence_size * sizeof(Signal_ma[0]));
 	      memset((void*)S_data, 0x00, byte_size * sizeof(S_data[0]));
 	      memset((void*)convolution_data, 0x00, sizeof(convolution_data));
+	      ADC1->ISR = ADC_ISR_EOS | ADC_ISR_EOC | ADC_ISR_OVR;
 	      NVIC_EnableIRQ(ADC1_2_IRQn);
 
 	      w = (uint16_t)-1;
@@ -455,15 +467,15 @@ static void MX_ADC1_Init(void)
   ADC_ChannelConfTypeDef sConfig = {0};
 
   hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV2;
-  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV8;
+  hadc1.Init.Resolution = ADC_RESOLUTION_10B;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.GainCompensation = 0;
-  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   hadc1.Init.LowPowerAutoWait = DISABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
-  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.NbrOfConversion = 4;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
@@ -487,6 +499,24 @@ static void MX_ADC1_Init(void)
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  sConfig.Rank = ADC_REGULAR_RANK_2;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  sConfig.Rank = ADC_REGULAR_RANK_3;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  sConfig.Rank = ADC_REGULAR_RANK_4;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -698,6 +728,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     	    HAL_UART_Transmit(&huart1, (uint8_t*)(&artur_output), sizeof(artur_output), 2);
     	}
     	artur_income[0] = 0x00; artur_income[1] = 0x00; artur_income[2] = 0x00;
+    	ADC1->ISR = ADC_ISR_EOS | ADC_ISR_EOC | ADC_ISR_OVR;
     	NVIC_EnableIRQ(ADC1_2_IRQn);
     	HAL_HalfDuplex_EnableReceiver(&huart1);
         HAL_UART_Receive_IT(&huart1, artur_income, 1);
