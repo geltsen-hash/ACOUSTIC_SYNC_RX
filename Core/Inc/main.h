@@ -34,7 +34,7 @@ extern "C" {
 /* USER CODE BEGIN ET */
 typedef struct __attribute__((packed)) {
 	uint8_t sync_status; /* 0: SEARCH, 1: LOCKED, 2: HOLDOVER */
-	float difference;    /* Frequency drift / time offset in microseconds */
+	float difference;    /* Phase error in TIM2 timer ticks (1 tick = 11.9 ns at 84 MHz) */
 	float snr;           /* Signal-to-Noise Ratio */
 } OutputPacket_t;
 /* USER CODE END ET */

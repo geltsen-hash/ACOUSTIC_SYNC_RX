@@ -76,12 +76,25 @@ void SysTick_Handler(void)
 /* STM32G4xx Peripheral Interrupt Handlers                                    */
 /******************************************************************************/
 
+extern void ADC_Process_ISR(void);
+
+volatile uint32_t dma_period_ticks = 0;
+volatile uint32_t isr_exec_ticks = 0;
+
 /**
   * @brief This function handles DMA1 channel 1 interrupt.
   */
 void DMA1_Channel1_IRQHandler(void)
 {
-  HAL_DMA_IRQHandler(&hdma_adc1);
+  static uint32_t last_dwt = 0;
+  uint32_t entry_dwt = DWT->CYCCNT;
+  dma_period_ticks = entry_dwt - last_dwt;
+  last_dwt = entry_dwt;
+
+  DMA1->IFCR = DMA_IFCR_CGIF1;
+  ADC_Process_ISR();
+
+  isr_exec_ticks = DWT->CYCCNT - entry_dwt;
 }
 
 /**
@@ -103,10 +116,7 @@ void USART1_IRQHandler(void)
 /**
   * @brief This function handles ADC1 and ADC2 global interrupt.
   */
-extern void ADC_Process_ISR(void);
-
 void ADC1_2_IRQHandler(void)
 {
   ADC1->ISR = ADC_ISR_EOS | ADC_ISR_EOC | ADC_ISR_OVR;
-  ADC_Process_ISR();
 }

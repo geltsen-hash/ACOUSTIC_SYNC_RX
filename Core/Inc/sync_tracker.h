@@ -43,7 +43,9 @@ typedef struct {
     /* Diagnostics */
     float last_raw_period;
     float last_temperature;
-    float accumulated_drift_us; /* Total estimated time drift in microseconds */
+    float accumulated_drift_us;      /* Total estimated time drift in microseconds */
+    float recovery_phase_diff_ticks; /* Phase error in TIM2 ticks on first sync after Holdover */
+    uint32_t recovery_missed_count;  /* Number of missed sync periods during last Holdover */
 } SyncTracker_t;
 
 /* Public Functions */
@@ -52,7 +54,10 @@ uint32_t SyncTracker_OnSyncDetected(SyncTracker_t *tracker, uint32_t raw_period_
 uint32_t SyncTracker_OnSyncMissed(SyncTracker_t *tracker, float current_temp);
 SyncState_t SyncTracker_GetState(const SyncTracker_t *tracker);
 float SyncTracker_GetFilteredPeriod(const SyncTracker_t *tracker);
+float SyncTracker_GetDifferenceTicks(const SyncTracker_t *tracker);
 float SyncTracker_GetDifferenceUs(const SyncTracker_t *tracker);
+float SyncTracker_GetRecoveryPhaseDiffTicks(const SyncTracker_t *tracker);
+uint32_t SyncTracker_GetRecoveryMissedCount(const SyncTracker_t *tracker);
 bool SyncTracker_IsHardResetRequired(const SyncTracker_t *tracker);
 
 #endif /* INC_SYNC_TRACKER_H_ */

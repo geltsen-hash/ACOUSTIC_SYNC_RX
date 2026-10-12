@@ -36,6 +36,8 @@ void SyncTracker_Init(SyncTracker_t *tracker)
     tracker->last_raw_period = (float)NOMINAL_SYNC_PERIOD_TICKS;
     tracker->last_temperature = 25.0f;
     tracker->accumulated_drift_us = 0.0f;
+    tracker->recovery_phase_diff_ticks = 0.0f;
+    tracker->recovery_missed_count = 0;
 }
 
 /**
@@ -90,6 +92,12 @@ uint32_t SyncTracker_OnSyncDetected(SyncTracker_t *tracker, uint32_t raw_period_
         }
         tracker->phase_error_ticks = phase_err;
         
+        // If recovering from Holdover state, record phase divergence and missed periods
+        if (tracker->state == SYNC_STATE_HOLDOVER) {
+            tracker->recovery_phase_diff_ticks = phase_err;
+            tracker->recovery_missed_count = tracker->missed_count;
+        }
+        
         // DPLL PI phase error accumulator
         tracker->phase_integrator += phase_err;
         // Anti-windup limit
@@ -97,16 +105,23 @@ uint32_t SyncTracker_OnSyncDetected(SyncTracker_t *tracker, uint32_t raw_period_
         if (tracker->phase_integrator < -10000.0f) tracker->phase_integrator = -10000.0f;
 
         // Online Tracking Filter (Alpha-Beta Filter for base frequency)
-        float alpha = (tracker->lock_count < 8) ? ALPHA_INITIAL : ALPHA_STEADY;
-        float beta  = (tracker->lock_count < 8) ? BETA_INITIAL  : BETA_STEADY;
-        
-        // Predict
-        float pred_period = tracker->filtered_period + tracker->drift_rate;
-        float residual = raw_f - pred_period;
-        
-        // Update frequency
-        tracker->filtered_period = pred_period + alpha * residual;
-        tracker->drift_rate = tracker->drift_rate + beta * residual;
+        if (tracker->lock_count == 1) {
+            // First valid 2.0s interval between consecutive sync pulses
+            tracker->filtered_period = raw_f;
+            tracker->drift_rate = 0.0f;
+            tracker->phase_error_ticks = 0.0f;
+        } else {
+            float alpha = (tracker->lock_count < 8) ? ALPHA_INITIAL : ALPHA_STEADY;
+            float beta  = (tracker->lock_count < 8) ? BETA_INITIAL  : BETA_STEADY;
+            
+            // Predict
+            float pred_period = tracker->filtered_period + tracker->drift_rate;
+            float residual = raw_f - pred_period;
+            
+            // Update frequency
+            tracker->filtered_period = pred_period + alpha * residual;
+            tracker->drift_rate = tracker->drift_rate + beta * residual;
+        }
         
         // Online temperature sensitivity estimation (kT = dN / dT)
         float delta_T = current_temp - tracker->last_temperature;
@@ -130,13 +145,7 @@ uint32_t SyncTracker_OnSyncDetected(SyncTracker_t *tracker, uint32_t raw_period_
     tracker->last_temperature = current_temp;
     tracker->accumulated_drift_us = (tracker->filtered_period - (float)NOMINAL_SYNC_PERIOD_TICKS) / 84.0f;
 
-    // DPLL Soft Correction: adjust ARR for the next period to pull phase error to zero
-    // If phase_error > 0 (pulse arrived after rollover), increase ARR to delay next rollover and align phase
-    float dpll_pull = DPLL_KP * tracker->phase_error_ticks + DPLL_KI * tracker->phase_integrator;
-    if (dpll_pull > MAX_DPLL_PULL_TICKS)  dpll_pull = MAX_DPLL_PULL_TICKS;
-    if (dpll_pull < -MAX_DPLL_PULL_TICKS) dpll_pull = -MAX_DPLL_PULL_TICKS;
-
-    float recommended_arr = tracker->filtered_period + dpll_pull;
+    float recommended_arr = tracker->filtered_period;
     return (uint32_t)roundf(recommended_arr);
 }
 
@@ -166,6 +175,7 @@ uint32_t SyncTracker_OnSyncMissed(SyncTracker_t *tracker, float current_temp)
     
     tracker->filtered_period = predicted_period;
     tracker->last_temperature = current_temp;
+    tracker->phase_error_ticks = 0.0f;
     tracker->accumulated_drift_us = (predicted_period - (float)NOMINAL_SYNC_PERIOD_TICKS) / 84.0f;
 
     return (uint32_t)roundf(predicted_period);
@@ -181,9 +191,24 @@ float SyncTracker_GetFilteredPeriod(const SyncTracker_t *tracker)
     return tracker->filtered_period;
 }
 
+float SyncTracker_GetDifferenceTicks(const SyncTracker_t *tracker)
+{
+    return tracker->phase_error_ticks;
+}
+
 float SyncTracker_GetDifferenceUs(const SyncTracker_t *tracker)
 {
-    return tracker->accumulated_drift_us;
+    return tracker->phase_error_ticks;
+}
+
+float SyncTracker_GetRecoveryPhaseDiffTicks(const SyncTracker_t *tracker)
+{
+    return tracker->recovery_phase_diff_ticks;
+}
+
+uint32_t SyncTracker_GetRecoveryMissedCount(const SyncTracker_t *tracker)
+{
+    return tracker->recovery_missed_count;
 }
 
 bool SyncTracker_IsHardResetRequired(const SyncTracker_t *tracker)

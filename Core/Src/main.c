@@ -63,12 +63,12 @@ UART_HandleTypeDef huart1;
 /* USER CODE BEGIN PV */
 SyncTracker_t sync_tracker;
 uint32_t sleep_pause = 1920;
-uint16_t sequence_size = 2048;
+uint16_t sequence_size = 4096;
 uint16_t byte_size = 66;
-volatile int32_t Signal_ma[2048];
+int32_t Signal_ma[4096];
 volatile uint32_t S_data[66];
 
-volatile uint16_t BUFF[4];
+volatile uint32_t BUFF[2];
 uint32_t sgn = 0;
 float sqr = 0;
 uint16_t w = (uint16_t)-1;
@@ -81,6 +81,10 @@ volatile int32_t convolution_data[16];
 volatile float convolution = 0;
 volatile uint32_t sub = 0;
 volatile int32_t  pwrMax = 0, pwrMin = 0;
+volatile int32_t conv_peak_max = 0;
+volatile int32_t peak_pos_sum = 0;
+volatile int32_t peak_neg_sum = 0;
+volatile int32_t peak_bits[31];
 volatile float SNR = 0;
 volatile uint32_t N = 0;
 volatile bool sync_catch_flg = false;
@@ -98,6 +102,8 @@ volatile uint32_t local_ticks_per_sync_period = 0;
 volatile uint32_t sync_raw_phase_cnt = 0;
 uint8_t artur_income[3];
 OutputPacket_t artur_output;
+volatile float recovery_phase_diff_ticks = 0.0f;
+volatile uint32_t recovery_missed_count = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -148,26 +154,30 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 		if (p_c >= 10) {
 			p_c = 0;
 			pwrMax = 0;
+			conv_peak_max = 0;
+			peak_pos_sum = 0;
+			peak_neg_sum = 0;
+			memset((void*)peak_bits, 0, sizeof(peak_bits));
 			S_summ = 0;
-			NVIC_DisableIRQ(ADC1_2_IRQn);
+			NVIC_DisableIRQ(DMA1_Channel1_IRQn);
 			memset((void*)Signal_ma, 0x00, sequence_size * sizeof(Signal_ma[0]));
 			memset((void*)S_data, 0x00, byte_size * sizeof(S_data[0]));
 			memset((void*)convolution_data, 0x00, sizeof(convolution_data));
-			ADC1->ISR = ADC_ISR_EOS | ADC_ISR_EOC | ADC_ISR_OVR;
-			NVIC_EnableIRQ(ADC1_2_IRQn);
+			DMA1->IFCR = DMA_IFCR_CGIF1;
+			NVIC_EnableIRQ(DMA1_Channel1_IRQn);
 		}
 
-		// Режим Holdover: если в прошедшем периоде синхросигнал не был детектирован
-		if (sync_catch_flg == 0 && sync_tracker.lock_count > 0) {
+		// Режим Holdover: если пропущен целый период (p_c > 1, так как в норме сбрасывается в 0)
+		if (p_c > 1 && sync_tracker.lock_count > 0) {
 			current_temperature = Read_Temperature_TMP235();
 			uint32_t holdover_period = SyncTracker_OnSyncMissed(&sync_tracker, current_temperature);
 			TIM2->ARR = holdover_period - 1;
 			artur_output.sync_status = (uint8_t)SyncTracker_GetState(&sync_tracker);
-			artur_output.difference = SyncTracker_GetDifferenceUs(&sync_tracker);
+			artur_output.difference = SyncTracker_GetDifferenceTicks(&sync_tracker);
 		}
 
-		ADC1->ISR = ADC_ISR_EOS | ADC_ISR_EOC | ADC_ISR_OVR;
-		NVIC_EnableIRQ(ADC1_2_IRQn);
+		DMA1->IFCR = DMA_IFCR_CGIF1;
+		NVIC_EnableIRQ(DMA1_Channel1_IRQn);
 		Rx_sts = SYNC;
 	}
 }
@@ -176,16 +186,20 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void ADC_Process_ISR(void)
 {
 	if(Rx_sts == SYNC){
-	    sub =  __SHSUB16(BUFF[0], BUFF[1]);
-	    sgn = __SMUAD(sub, sub);
-	    sqr = sqrtf((float)sgn);
+	    uint32_t sub_val = __SHSUB16(BUFF[0], BUFF[1]);
+	    uint32_t sgn_val = __SMUAD(sub_val, sub_val);
+	    float sqr_val = sqrtf((float)sgn_val);
+
+	    sub = sub_val;
+	    sgn = sgn_val;
+	    sqr = sqr_val;
 
 	    // скользящее среднее
 	    w_ma++;
 	   	if(w_ma >= SAMPLES_PER_BIT)
 	   		w_ma = 0;
 	 	S_summ -= S_data[w_ma];
-	    S_data[w_ma] = (uint32_t)sqr;
+	    S_data[w_ma] = (uint32_t)sqr_val;
 	    S_summ += S_data[w_ma];
 
 	    // главная последовательность 66*31=2046
@@ -193,10 +207,11 @@ void ADC_Process_ISR(void)
 		if (w >= SYNC_SEQ_LEN)
 			w = 0;
 		Signal_ma[w] = S_summ;
+		Signal_ma[w + SYNC_SEQ_LEN] = S_summ;
 
 		// пиковый детектор
-		if(Signal_ma[w] > pwrMax) {
-			pwrMax = Signal_ma[w];
+		if(S_summ > pwrMax) {
+			pwrMax = S_summ;
 		}
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -204,41 +219,52 @@ void ADC_Process_ISR(void)
 		w_c++;
 		w_c = w_c & 0x7;
 
-		uint16_t idx = w;
-		int32_t conv = Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv -= Signal_ma[idx];
-		idx += 66; if (idx >= SYNC_SEQ_LEN) idx -= SYNC_SEQ_LEN; conv += Signal_ma[idx];
+		const int32_t *p = &Signal_ma[w];
+		int32_t conv_pos = p[0]
+		                 + p[198]
+		                 + p[396]
+		                 + p[462]
+		                 + p[528]
+		                 + p[594]
+		                 + p[660]
+		                 + p[792]
+		                 + p[858]
+		                 + p[924]
+		                 + p[1188]
+		                 + p[1320]
+		                 + p[1452]
+		                 + p[1518]
+		                 + p[1650]
+		                 + p[1980]; // 16 positive terms
+
+		int32_t conv_neg = p[66]
+		                 + p[132]
+		                 + p[264]
+		                 + p[330]
+		                 + p[726]
+		                 + p[990]
+		                 + p[1056]
+		                 + p[1122]
+		                 + p[1254]
+		                 + p[1386]
+		                 + p[1584]
+		                 + p[1716]
+		                 + p[1782]
+		                 + p[1848]
+		                 + p[1914]; // 15 negative terms
+
+		int32_t conv = conv_pos - conv_neg;
 
 		convolution_data[w_c] = conv;
 		convolution = convolution_data[(w_c + 3) & 0x7];
+		if (conv > conv_peak_max) {
+			conv_peak_max = conv;
+			peak_pos_sum = conv_pos;
+			peak_neg_sum = conv_neg;
+			for (int i = 0; i < 31; i++) {
+				peak_bits[i] = p[i * 66];
+			}
+		}
 
 	    if(
 	        convolution_data[(w_c + 3) & 0x7] > pwrMax * 10
@@ -246,11 +272,12 @@ void ADC_Process_ISR(void)
 		    && convolution_data[(w_c + 3) & 0x7] > convolution_data[(w_c + 4) & 0x7]
 		  ){
 	    	 HAL_GPIO_WritePin(LED_GPIO_Port, LED_PIN, GPIO_PIN_SET); // включение светодиода PB15
-	    	 sync_raw_phase_cnt = TIM2->CNT;
+	    	 sync_raw_phase_cnt = TIM2->CNT; // Фиксация фазы перед сбросом (уход во время Holdover)
+	    	 TIM2->CNT = 0x0;                // Жесткая аппаратная привязка TIM2 к сигналу (как на F407)
 	    	 local_ticks_per_sync_period = DWT->CYCCNT;
 	    	 DWT->CYCCNT = 0U;
 	    	 sync_catch_flg = 1;
-		     NVIC_DisableIRQ(ADC1_2_IRQn);
+		     NVIC_DisableIRQ(DMA1_Channel1_IRQn);
 	    }
 	}
 }
@@ -319,9 +346,10 @@ int main(void)
 
   // Запуск АЦП1 в непрерывном режиме с DMA (4 выборки за период 154.412 кГц)
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)BUFF, 4);
-  __HAL_ADC_ENABLE_IT(&hadc1, ADC_IT_EOS);
-  __HAL_DMA_DISABLE_IT(&hdma_adc1, DMA_IT_TC | DMA_IT_HT | DMA_IT_TE);
-  HAL_NVIC_DisableIRQ(DMA1_Channel1_IRQn);
+  __HAL_DMA_DISABLE_IT(&hdma_adc1, DMA_IT_HT); // Прерывание строго по завершению всех 4 выборок (TC)
+  DMA1->IFCR = DMA_IFCR_CGIF1;
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
 
   artur_income[0] = 0x00; artur_income[1] = 0x00; artur_income[2] = 0x00;
   /* USER CODE END 2 */
@@ -354,26 +382,27 @@ int main(void)
 	          SNR = 0.0f;
 	      }
 	      pwrMax = 0;
+	      conv_peak_max = 0;
+	      peak_pos_sum = 0;
+	      peak_neg_sum = 0;
+	      memset((void*)peak_bits, 0, sizeof(peak_bits));
 	      pwrMin = 0;
 	      p_c = 0;
 
 	      // Периодическое чтение температуры
 	      current_temperature = Read_Temperature_TMP235();
 
-	      // DPLL адаптивная фильтрация периода и фазы с подстройкой TIM2->ARR
+	      // Адаптивная фильтрация периода с подстройкой TIM2->ARR
 	      uint32_t current_arr = TIM2->ARR + 1;
 	      uint32_t recommended_arr_period = SyncTracker_OnSyncDetected(&sync_tracker, local_ticks_per_sync_period, sync_raw_phase_cnt, current_arr, current_temperature);
-	      if (SyncTracker_IsHardResetRequired(&sync_tracker)) {
-	          TIM2->CNT = 0x0; // Разовый сброс фазы при начальном захвате
-	      }
 	      TIM2->ARR = recommended_arr_period - 1;
 
-	      NVIC_DisableIRQ(ADC1_2_IRQn);
+	      NVIC_DisableIRQ(DMA1_Channel1_IRQn);
 	      memset((void*)Signal_ma, 0x00, sequence_size * sizeof(Signal_ma[0]));
 	      memset((void*)S_data, 0x00, byte_size * sizeof(S_data[0]));
 	      memset((void*)convolution_data, 0x00, sizeof(convolution_data));
-	      ADC1->ISR = ADC_ISR_EOS | ADC_ISR_EOC | ADC_ISR_OVR;
-	      NVIC_EnableIRQ(ADC1_2_IRQn);
+	      DMA1->IFCR = DMA_IFCR_CGIF1;
+	      NVIC_EnableIRQ(DMA1_Channel1_IRQn);
 
 	      w = (uint16_t)-1;
 	      w_ma = (uint8_t)-1;
@@ -383,8 +412,10 @@ int main(void)
 	      while((int32_t)(TIM2->CNT - led_pulse_off_time) < 0) {;}
 	      HAL_GPIO_WritePin(LED_GPIO_Port, LED_PIN, GPIO_PIN_RESET);
 	      artur_output.sync_status = (uint8_t)SyncTracker_GetState(&sync_tracker);
-	      artur_output.difference = SyncTracker_GetDifferenceUs(&sync_tracker);
+	      artur_output.difference = SyncTracker_GetDifferenceTicks(&sync_tracker);
 	      artur_output.snr = SNR;
+	      recovery_phase_diff_ticks = SyncTracker_GetRecoveryPhaseDiffTicks(&sync_tracker);
+	      recovery_missed_count = SyncTracker_GetRecoveryMissedCount(&sync_tracker);
 
 #ifndef REQUEST_RESPONSE_MODE
 	      while((int32_t)(TIM2->CNT - print_start_time) < 0) {;}
@@ -456,6 +487,9 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+
+  /* Включение предвыборки команд и кэшей данных/инструкций Flash для работы на полной скорости */
+  FLASH->ACR |= FLASH_ACR_PRFTEN | FLASH_ACR_DCEN | FLASH_ACR_ICEN;
 }
 
 /**
@@ -714,22 +748,22 @@ static void MX_GPIO_Init(void)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	if(huart == &huart1)
     {
-		NVIC_DisableIRQ(ADC1_2_IRQn);
+		NVIC_DisableIRQ(DMA1_Channel1_IRQn);
 		if(artur_output.sync_status == SYNC_STATE_LOCKED || artur_output.sync_status == SYNC_STATE_HOLDOVER)
 		    Rx_sts = SLEEP;
 		HAL_GPIO_TogglePin(LED_GPIO_Port, LED_PIN);
     	if(artur_income[0] == 0x37)
     	{
     		delay_micros(100);
-    	    artur_output.difference = SyncTracker_GetDifferenceUs(&sync_tracker);
+    	    artur_output.difference = SyncTracker_GetDifferenceTicks(&sync_tracker);
     	    artur_output.sync_status = (uint8_t)SyncTracker_GetState(&sync_tracker);
     	    artur_output.snr = SNR;
     	    HAL_HalfDuplex_EnableTransmitter(&huart1);
     	    HAL_UART_Transmit(&huart1, (uint8_t*)(&artur_output), sizeof(artur_output), 2);
     	}
     	artur_income[0] = 0x00; artur_income[1] = 0x00; artur_income[2] = 0x00;
-    	ADC1->ISR = ADC_ISR_EOS | ADC_ISR_EOC | ADC_ISR_OVR;
-    	NVIC_EnableIRQ(ADC1_2_IRQn);
+    	DMA1->IFCR = DMA_IFCR_CGIF1;
+    	NVIC_EnableIRQ(DMA1_Channel1_IRQn);
     	HAL_HalfDuplex_EnableReceiver(&huart1);
         HAL_UART_Receive_IT(&huart1, artur_income, 1);
     }
